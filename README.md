@@ -38,16 +38,18 @@ For a directory (folder) containing `.dxf` files, we can create a matching
 ```R
 library(isoreader)
 
-DIR <- "path/to/my/directory"
+DIR <- "path/to/directory"
+OUTFILE <- "test_data_prepped.csv"
+
+OUTFILE <- paste(DIR, OUTFILE, sep = "")
 
 dxf_files <- list.files(path=DIR, pattern="*.dxf", full.names=TRUE, recursive=FALSE)
-lapply(dxf_files, function(x) {
-    f <- iso_read_continuous_flow(x)
-    t <- iso_get_vendor_data_table(f,
-                         include_file_info=c(file_datetime, starts_with("Identifier"))
-                         )
-    write.table(t, gsub(".dxf", ".csv", x), sep=",", row.names=FALSE)
-})
+file_data <- iso_read_continuous_flow(dxf_files)
+output_data <- file_data |> iso_get_vendor_data_table(
+    include_file_info=c(file_datetime, starts_with("Identifier"))
+    )
+
+write.table(output_data, OUTFILE, sep=",", row.names=FALSE)
 ```
 
 Where each `.csv` contains the "vendor data" (the per-peak isotope ratio data that you'd
