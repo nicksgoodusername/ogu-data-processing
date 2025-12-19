@@ -1,110 +1,142 @@
 import pandas as pd
 import numpy as np
 from math import sqrt
-from re import search
-
 
 schimm_F8_deltas = [-231.2, -231.2, -166.8, -211, -206.2, -214.2, -166.7, -195.5]
 schimm_F8_peaks = [x for x in range(7, 15)]
+schimm_F8_lookup = dict(zip(schimm_F8_peaks, schimm_F8_deltas))
 
 
-def get_summary_info(exported_data: pd.DataFrame):
+def process_2H_vendor_data(exported_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standardise the columns of a dataframe obtained from processing Delta V hydrogen isotope ratio
+    `.dxf` files. For information on how to produce this dataframe, see the repository README.
 
-    run_id = exported_data["Identifier 1"].tolist()[0]
-    run_id_no = int(search(r"\d+", run_id)[0])
-    sample_id = exported_data["Identifier 2"].tolist()[0]
-    run_datetime = exported_data["file_datetime"].tolist()[0]
+    :param exported_data: A dataframe containing data as exported from hydrogen isotope isodat files
+    :return: The dataframe with added/renamed columns
+    """
 
-    return {"run_id": run_id,
-            "run_id_no": run_id_no,
-            "sample_id": sample_id,
-            "run_datetime": run_datetime}
+    df = exported_data.rename({"Nr.": "peak_no"}, axis=1)
+    df["file_datetime"] = pd.to_datetime(df["file_datetime"])
+    df["run_id"] = df["Identifier 1"]
+    df["run_id_no"] = df["run_id"].str.extract(r"(\d+)").astype(int)
+    df["sample_id"] = df["Identifier 2"]
+    df["delta_meas"] = df["d 2H/1H"]
 
-
-def process_vendor_data(exported_data: pd.DataFrame) -> pd.DataFrame:
-
-    exported_data_mod = exported_data.rename({"Nr.": "peak_no"}, axis=1)
-    return exported_data_mod
+    return df
 
 
 def get_bracketing_reference_runs(sample_summary_data: pd.DataFrame,
                                   reference_summary_data: pd.DataFrame) -> pd.DataFrame:
     """
-    Take a dataframe of sample summary data (from `get_summary_info` over several samples)
-    and a dataframe of reference material summary data (from `reference_regression` over several
-    standards) and append the bracketing pair of reference runs for each sample run to the sample
-    dataframe.
+    Take a dataframe of sample summary data (one row per sample run containing columns `run_id`,
+    `run_id_no`, and `file_datetime`) and a dataframe of reference material summary data (from
+    running `reference_regression` on the referance material peak data) and add information about
+    the bracketing pair of reference runs for each sample run to the sample dataframe.
 
-    :param sample_summary_data: Summary data for samples
-    :param reference_summary_data: Summary data for reference materials (including regression metrics)
-    :return: Sample dataframe with columns for preceding and following reference material runs
+    :param sample_summary_data: Summary dataframe for samples
+    :param reference_summary_data: Summary dataframe for reference materials (including regression metrics)
+
+    :return: Sample summary dataframe with added columns for preceding and following reference material runs
     """
 
-    for df in (sample_summary_data, reference_summary_data):
-        df["run_id_no"] = pd.to_numeric(df["run_id_no"])
+    df_sam_sum = sample_summary_data.copy()
+    df_ref_sum = reference_summary_data.copy()
 
-    merged_data = sample_summary_data.copy()
+    # Check that the data has been properly processed
+    required_cols = ["run_id_no", "file_datetime"]
+    for df in (df_sam_sum, df_ref_sum):
+        if any(col not in df.columns for col in required_cols):
+            raise ValueError("Required columns not found. Please apply a processing function.")
+
+    # For each run, find the immediately preceding and following reference material runs
     for direction in ("backward", "forward"):
-        ref_data = reference_summary_data.copy().rename(
-            {x: f"{direction}_ref_{x}" for x in reference_summary_data.columns}, axis=1)
-        merged_data = pd.merge_asof(merged_data,
-                                    ref_data,
-                                    left_on="run_id_no",
-                                    right_on=f"{direction}_ref_run_id_no",
-                                    direction=direction)
 
-        merged_data[f"{direction}_ref_time_delta"] = (
-            pd.to_datetime(merged_data[f"{direction}_ref_run_datetime"]) -
-            pd.to_datetime(merged_data["run_datetime"])
+        # Rename the reference data columns to reflect how the data relate to the samples
+        ref_data = df_ref_sum.copy().rename(
+            {x: f"{direction}_ref_{x}" for x in reference_summary_data.columns}, axis=1
+            )
+
+        # Join the reference data to the sample data on run ID number in the specified direction
+        df_sam_sum = pd.merge_asof(df_sam_sum,
+                                   ref_data,
+                                   left_on="run_id_no",
+                                   right_on=f"{direction}_ref_run_id_no",
+                                   direction=direction)
+
+        # Calculate the time delta in seconds between each sample run and each of its bracketing reference runs
+        df_sam_sum[f"{direction}_ref_time_delta"] = (
+            pd.to_datetime(df_sam_sum[f"{direction}_ref_file_datetime"]) -
+            pd.to_datetime(df_sam_sum["file_datetime"])
             ) / np.timedelta64(1, "s")
 
-    return merged_data
+    return df_sam_sum
 
 
-def reference_regression(exported_data: pd.DataFrame,
-                         ref_peaks: list = schimm_F8_peaks,
-                         ref_known_deltas: list = schimm_F8_deltas
-                         ) -> dict:
+def regression_analysis(group: pd.DataFrame) -> pd.Series:
     """
-    Perform a linear regression on deltaD data from a Schimmelmann F8 reference material
-    taken on a Delta V instrument. The resultant data will be used to normalise
-    sample deltaD values.
+    An aggregation function to convert reference material peak data into linear regression metrics.
 
-    :param peak_data: A Pandas dataframe containing the peak data as exported by my R function
-    :param ref_peaks: A list containing the peak numbers of the reference material peaks in order
-    :param ref_known_deltas: A list containing the known deltaD values of each reference peak in order
-    :return: A dict containing the run ID and results of the linear regression
+    Operates on one run at a time, either by passing individual per-run dataframes or, (more usefully)
+    by using in a split-apply-combine operation, as in `reference_regression`.
+
+    :param group: Dataframe containing data for a single referance material run
+    :return: A Pandas series with named columns `gradient`, `intercept`, and `rms_error`
     """
 
-    out_dict = get_summary_info(exported_data)
+    meas_vals = group["delta_meas"]
+    known_vals = group["delta_known"]
+    grad, incpt = np.polyfit(known_vals, meas_vals, 1)  # Do 1st order linear regression
+    norm_meas_vals = [(d - incpt) / grad for d in meas_vals]  # Normalise the measured data with the regression metrics
 
-    if not len(ref_known_deltas) == len(ref_peaks):
-        raise ValueError('The number of reference peaks must be the same as the number of known deltaD values')
+    delta_diffs = np.subtract(known_vals, norm_meas_vals)
+    rms_error = sqrt(sum(diff**2 for diff in delta_diffs) / len(known_vals))  # Calculate mean RMS error
 
-    df = process_vendor_data(exported_data)
-
-    df = df.loc[df["peak_no"].isin(ref_peaks)].copy().sort_values(by=["peak_no"])
-
-    x_vals = ref_known_deltas
-    y_vals = df["d 2H/1H"].tolist()
-
-    grad, incpt = np.polyfit(x_vals, y_vals, 1).tolist()
-
-    ref_peak_deltas_norm = [(d - incpt) / grad for d in y_vals]
-    ref_delta_diffs = np.subtract(ref_known_deltas, ref_peak_deltas_norm)
-    rms_error = sqrt(sum([diff**2 for diff in ref_delta_diffs]) / len(ref_peaks))
-
-    out_dict.update({"gradient": grad,
-                     "intercept": incpt,
-                     "rms_error": rms_error})
-
-    return out_dict
+    return pd.Series({"gradient": grad,
+                      "intercept": incpt,
+                      "rms_error": rms_error})
 
 
-def sel_norm_peak_data(sample_peak_data: pd.DataFrame,
-                       sample_summary_data: pd.DataFrame,
-                       peak_ret_ts: list,
-                       ret_t_tolerance: int = 5):
+def reference_scale_normalisation(ref_meas: pd.DataFrame,
+                                  ref_info: dict = schimm_F8_lookup
+                                  ) -> pd.DataFrame:
+    """
+    Calculate scale normalisation parameters (gradient, intercept, RMS error) for each reference material run
+    in a dataframe. The parameters are of the form
+
+        deltaMeas = *m* · deltaTrue + *c*
+
+    Where deltaMeas is the measured delta value of a given peak, deltaTrue is the "true" (scale corrected)
+    value and *m* and *c* are the gradient and intercept of the least squares regression line respectively.
+
+    :param ref_meas: A long-format dataframe of reference material peak data
+    :param ref_info: A dictionary of peak_number: known_delta_value pairs for the reference material
+    :return: A per-run dataframe containing IDs and scale normalisation parameters for each reference material
+    injection
+    """
+
+    # Check that the data has been processed
+    if "peak_no" not in ref_meas.columns:
+        raise ValueError("Required column(s) not found. Please apply a processing function.")
+
+    # Select only the reference peaks, add a column with the known peak values
+    df_ref = ref_meas\
+        .loc[ref_meas["peak_no"].isin(ref_info.keys())]\
+        .assign(delta_known=lambda d: d["peak_no"].map(ref_info))\
+        .copy()
+
+    # Perform regression analysis on each run
+    group_cols = ["run_id", "run_id_no", "file_datetime"]
+    df_ref_reg = df_ref.groupby(group_cols, as_index=False)\
+                       .apply(regression_analysis, include_groups=False)
+
+    return df_ref_reg
+
+
+def normalise_sample_peak_data(sample_peak_data: pd.DataFrame,
+                               sample_summary_data: pd.DataFrame,
+                               peak_ret_ts: list,
+                               ret_t_tolerance: int = 5):
     """
     Select peaks of interest and normalise them according to the correct bracketing standard runs.
 
@@ -117,12 +149,16 @@ def sel_norm_peak_data(sample_peak_data: pd.DataFrame,
     :return: A dataframe of selected peaks, with columns for their raw and normalised delta values
     """
 
-    peak_data = process_vendor_data(sample_peak_data)
+    # Check that both dataframes have been processed correctly
+    for df in (sample_peak_data, sample_summary_data):
+        if "run_id" not in df.columns:
+            raise ValueError("Required column(s) not found. Please apply a processing function.")
 
-    merged_data = pd.merge(peak_data,
+    # Find all shared columns in the two dataframes so that we can join on them
+    join_cols = list(set(sample_peak_data.columns) & set(sample_summary_data.columns))
+    merged_data = pd.merge(sample_peak_data,
                            sample_summary_data,
-                           left_on="Identifier 1",
-                           right_on="run_id")
+                           on=join_cols)
 
     # Select only rows with retention times within margin of the selected RTs
     merged_data = merged_data.loc[(
@@ -131,12 +167,14 @@ def sel_norm_peak_data(sample_peak_data: pd.DataFrame,
             ) <= ret_t_tolerance).any(axis=1)
     ]
 
+    # Calculate the mean correction coefficients from the bracketing reference material runs
     for coeff in ("gradient", "intercept"):
         merged_data[f"mean_{coeff}"] = merged_data[[f"forward_ref_{coeff}",
                                                     f"backward_ref_{coeff}"]].mean(axis=1)
 
-    merged_data["norm d 2H/1H"] = (merged_data["d 2H/1H"] -
-                                   merged_data["mean_intercept"]) / merged_data["mean_gradient"]
+    # Calculate the normalised delta for each peak of interest
+    merged_data["delta_norm"] = (merged_data["delta_meas"] -
+                                 merged_data["mean_intercept"]) / merged_data["mean_gradient"]
 
     return merged_data
 
@@ -147,15 +185,15 @@ def triplicate_analysis(normalised_data: pd.DataFrame,
     """
     Take long-format normalised peak data and extract the mean and StdDev for each set of triplicates
 
-    :param normalised_data: Output from `sel_norm_peak_data`
+    :param normalised_data: Output from `normalise_sample_peak_data`
     :param peak_ret_ts: Expected retention times of peaks of interest (e.g. C16, C18) in seconds
     :param ret_t_tolerance: Tolerance for variation in peak retention times in seconds
     :return: Dataframe containing summary delta value data for each sample
     """
 
     df = normalised_data.copy()
-    df["sample_id_short"] = df["sample_id"].str[:-1]
-    df["approx_RT"] = df["Rt"].apply(
+    df["sample_id_short"] = df["sample_id"].str[:-1]  # Remove repeat suffix to allow grouping by sample
+    df["approx_RT"] = df["Rt"].apply(  # Round retention times to expected values if within tolerance
         lambda x: int([t for t in peak_ret_ts if abs(x - t) <= ret_t_tolerance][0])
     )
 
@@ -167,10 +205,9 @@ def triplicate_analysis(normalised_data: pd.DataFrame,
                   "mean_gradient"
                   ]
 
-    df_grouped = df.groupby(["sample_id_short", "approx_RT"])\
-                   .describe()["norm d 2H/1H"][["count", "mean", "std"]].reset_index()
-    df_grouped.rename(columns={x: x + "_delta_2H" for x in ["mean", "std"]}, inplace=True)
+    # Group runs by triplicate grouping and compound (retention time); calculate mean and StdDev, record run count
+    df_grouped = df.groupby(index_cols)["delta_norm"]\
+                   .agg(["count", "mean", "std"]).reset_index()\
+                   .rename(columns={x: "delta_norm_" + x for x in ["mean", "std"]})
 
-    df_out = df[index_cols].drop_duplicates().merge(df_grouped, on=["sample_id_short", "approx_RT"])
-
-    return df_out
+    return df_grouped
