@@ -51,7 +51,7 @@ lapply(dxf_files, function(x) {
 ```
 
 Where each `.csv` contains the "vendor data" (the per-peak isotope ratio data that you'd
-ordinarilly copy and paste into an Excel sheet) as well as some extra information like
+ordinarily copy and paste into an Excel sheet) as well as some extra information like
 the date/time the run was started.
 
 These `.csv`s are now ready to be processed in Python with this package.
