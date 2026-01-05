@@ -31,7 +31,7 @@ def get_bracketing_reference_runs(sample_summary_data: pd.DataFrame,
     """
     Take a dataframe of sample summary data (one row per sample run containing columns `run_id`,
     `run_id_no`, and `file_datetime`) and a dataframe of reference material summary data (from
-    running `reference_regression` on the reference material peak data) and add information about
+    running `reference_scale_normalisation` on the reference material peak data) and add information about
     the bracketing pair of reference runs for each sample run to the sample dataframe.
 
     :param sample_summary_data: Summary dataframe for samples
@@ -77,8 +77,8 @@ def regression_analysis(group: pd.DataFrame) -> pd.Series:
     """
     An aggregation function to convert reference material peak data into linear regression metrics.
 
-    Operates on one run at a time, either by passing individual per-run dataframes or, (more usefully)
-    by using in a split-apply-combine operation, as in `reference_regression`.
+    This function is not normally called explicitly; it is most usefully used in a split-apply-combine
+    operation, as in `reference_scale_normalisation`.
 
     :param group: Dataframe containing data for a single reference material run
     :return: A Pandas series with named columns `gradient`, `intercept`, and `rms_error`
