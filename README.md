@@ -32,14 +32,14 @@ Handily, the [isoreader](https://isoreader.isoverse.org/index.html) R package ha
 developed to handle these files, and can export useful data as easy-to-read `.csv`
 files, which this package can then process.
 
-For a directory (folder) containing `.dxf` files, we can create a matching
-`.csv` file for each as follows:
+For a directory (folder) containing `.dxf` files, we can create single
+`.csv` file containing every run's data as follows:
 
 ```R
 library(isoreader)
 
-DIR <- "path/to/directory"
-OUTFILE <- "test_data_prepped.csv"
+DIR <- "path/to/directory/data"
+OUTFILE <- "path/to/directory/all_run_data.csv"
 
 OUTFILE <- paste(DIR, OUTFILE, sep = "")
 
@@ -52,8 +52,8 @@ output_data <- file_data |> iso_get_vendor_data_table(
 write.table(output_data, OUTFILE, sep=",", row.names=FALSE)
 ```
 
-Where each `.csv` contains the "vendor data" (the per-peak isotope ratio data that you'd
-ordinarily copy and paste into an Excel sheet) as well as some extra information like
-the date/time the run was started.
+Where the `.csv` contains the "vendor data" (the per-peak isotope ratio data that you'd
+ordinarily copy and paste into an Excel sheet) for each run as well as some extra
+information like the date/time the run was started.
 
-These `.csv`s are now ready to be processed in Python with this package.
+This `.csv` is now ready to be processed in Python with this package.
